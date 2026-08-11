@@ -1,0 +1,24 @@
+[package]
+name = "fit-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fit"
+path = "src/main.rs"
+
+[dependencies]
+fit-core.workspace = true
+fit-format.workspace = true
+fit-compression.workspace = true
+fit-archive.workspace = true
+fit-detection.workspace = true
+fit-crypto.workspace = true
+fit-recovery.workspace = true
+fit-plugins.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+rayon.workspace = true
+

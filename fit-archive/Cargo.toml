@@ -1,0 +1,22 @@
+[package]
+name = "fit-archive"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fit-core.workspace = true
+fit-format.workspace = true
+fit-compression.workspace = true
+fit-crypto.workspace = true
+fit-recovery.workspace = true
+fit-detection.workspace = true
+serde.workspace = true
+bincode.workspace = true
+sha2.workspace = true
+crc32fast.workspace = true
+xxhash-rust.workspace = true
+rayon.workspace = true
+hex.workspace = true
+tempfile.workspace = true
+
+

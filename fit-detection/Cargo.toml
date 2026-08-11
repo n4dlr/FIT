@@ -1,0 +1,8 @@
+[package]
+name = "fit-detection"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fit-core.workspace = true
+serde.workspace = true

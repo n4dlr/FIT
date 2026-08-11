@@ -1,0 +1,16 @@
+[package]
+name = "fit-plugins"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fit-core.workspace = true
+fit-format.workspace = true
+fit-archive.workspace = true
+fit-detection.workspace = true
+tar.workspace = true
+flate2.workspace = true
+zip.workspace = true
+zstd.workspace = true
+xz2.workspace = true
+serde.workspace = true

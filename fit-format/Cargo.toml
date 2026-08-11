@@ -1,0 +1,13 @@
+[package]
+name = "fit-format"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fit-core.workspace = true
+serde.workspace = true
+bincode.workspace = true
+byteorder.workspace = true
+crc32fast.workspace = true
+xxhash-rust.workspace = true
+sha2.workspace = true

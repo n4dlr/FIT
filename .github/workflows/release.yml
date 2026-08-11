@@ -120,19 +120,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Java JDK
+      - name: Setup Java JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Android NDK & SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK r25
+        run: |
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
+            "ndk;25.2.9519653" \
+            "build-tools;34.0.0" \
+            "platforms;android-34"
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
 
       - name: Install Rust Android Targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -140,12 +149,33 @@ jobs:
           node-version: 20
 
       - name: Install Frontend Dependencies
-        run: |
-          cd fit-gui
-          npm install
+        run: cd fit-gui && npm install
 
-      - name: Build Android APK
+      - name: Initialize Tauri Android Project
         run: |
           cd fit-gui
-          npx -y @tauri-apps/cli android init --no-prompt || true
-          npx -y @tauri-apps/cli android build --apk || true
+          npx -y @tauri-apps/cli android init
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Build Android APK (release)
+        run: |
+          cd fit-gui
+          npx -y @tauri-apps/cli android build --apk
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Find & rename APK
+        run: |
+          APK=$(find fit-gui/src-tauri/gen/android -name "*.apk" | head -n 1)
+          cp "$APK" ./FIT-${{ github.ref_name }}-android.apk
+
+      - name: Upload APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: FIT-${{ github.ref_name }}-android.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

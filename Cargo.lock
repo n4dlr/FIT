@@ -1096,7 +1096,7 @@ checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
 
 [[package]]
 name = "fit-archive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "crc32fast",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "fit-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "fit-compression"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "fit-core",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "fit-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "fit-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -1172,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "fit-detection"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fit-core",
  "serde",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "fit-format"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "fit-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fit-archive",
  "fit-compression",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "fit-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fit-archive",
  "fit-core",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "fit-recovery"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "fit-core",

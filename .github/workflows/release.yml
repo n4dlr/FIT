@@ -15,14 +15,9 @@ jobs:
       matrix:
         include:
           - platform: 'ubuntu-22.04'
-            args: ''
             target: 'x86_64-unknown-linux-gnu'
           - platform: 'windows-latest'
-            args: ''
             target: 'x86_64-pc-windows-msvc'
-          - platform: 'macos-latest'
-            args: ''
-            target: 'x86_64-apple-darwin'
 
     runs-on: ${{ matrix.platform }}
 
@@ -50,13 +45,59 @@ jobs:
           cd fit-gui
           npm install
 
-      - name: Build Tauri Desktop App & Bundles (.deb, .AppImage, .msi, .exe, .dmg)
+      - name: Build Tauri Desktop App & Bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'FIT v__VERSION__'
-          releaseBody: 'See the assets to download pre-compiled packages.'
-          releaseDraft: true
+          projectPath: './fit-gui'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'FIT ${{ github.ref_name }}'
+          releaseBody: 'FIT — Extreme Lossless Compression & Universal Archive Platform.'
+          releaseDraft: false
           prerelease: false
+
+  build-cli:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu
+
+      - name: Install MinGW
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 dpkg-dev
+
+      - name: Build Linux CLI & .deb
+        run: |
+          cargo build --release -p fit-cli
+          mkdir -p /tmp/fit-deb/DEBIAN /tmp/fit-deb/usr/bin
+          cp target/release/fit /tmp/fit-deb/usr/bin/fit
+          cat << 'EOF' > /tmp/fit-deb/DEBIAN/control
+          Package: fit-cli
+          Version: 0.1.0
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Nadir <nadir@fit.arch>
+          Description: FIT CLI — Extreme Lossless Compression Tool
+          EOF
+          dpkg-deb --build /tmp/fit-deb ./fit-cli-linux-amd64.deb
+
+      - name: Build Windows CLI .exe
+        run: |
+          cargo build --release --target x86_64-pc-windows-gnu -p fit-cli
+          cp target/x86_64-pc-windows-gnu/release/fit.exe ./fit-cli-windows-amd64.exe
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            fit-cli-linux-amd64.deb
+            fit-cli-windows-amd64.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

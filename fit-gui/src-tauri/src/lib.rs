@@ -45,7 +45,7 @@ fn smart_compress(req: CompressionRequest) -> Result<CompressionTelemetry, Strin
         deduplication: true,
         encryption_password: req.password,
         recovery_percent: req.recovery_percent,
-        threads: rayon::current_num_threads(),
+        threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
         block_size: 4 * 1024 * 1024,
     };
 

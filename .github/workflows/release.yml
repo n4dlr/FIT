@@ -90,7 +90,7 @@ jobs:
           cp target/release/fit /tmp/fit-deb/usr/bin/fit
           cat << 'EOF' > /tmp/fit-deb/DEBIAN/control
           Package: fit-cli
-          Version: 0.1.0
+          Version: 0.2.1
           Section: utils
           Priority: optional
           Architecture: amd64

@@ -1,9 +1,9 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 
 // ────────────────────────────────────────────────────────────
-// Icons (inline SVG components to avoid external runtime deps)
+// Icons (clean inline SVG components)
 // ────────────────────────────────────────────────────────────
-
 const Icon = ({ d, size = 18, color = 'currentColor' }: { d: string; size?: number; color?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
     <path d={d} />
@@ -29,14 +29,71 @@ const ICONS = {
   layers: 'M12 2L2 7l10 5 10-5-10-5z M2 17l10 5 10-5 M2 12l10 5 10-5',
   cpu: 'M18 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z M9 9h6v6H9z M9 1v3 M15 1v3 M9 20v3 M15 20v3 M20 9h3 M20 14h3 M1 9h3 M1 14h3',
   star: 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z',
-  clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 6v6l4 2',
+  trash: 'M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2',
+  alert: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z',
 };
 
-type NavTab = 'home' | 'archives' | 'smart' | 'extract' | 'benchmark' | 'settings';
+type NavTab = 'home' | 'smart' | 'archives' | 'extract' | 'benchmark' | 'settings';
 
-interface PipelineResult { name: string; size: string; status: 'winner' | 'pass' | 'running' | 'pending' }
+interface StagedFile {
+  path: string;
+  name: string;
+  size: number;
+  is_dir: boolean;
+  detected_type: string;
+  entropy: number;
+}
 
-interface ArchiveEntry { name: string; size: string; ratio: string; type: string; icon: string }
+interface CompressionTelemetry {
+  original_bytes: number;
+  compressed_bytes: number;
+  ratio: number;
+  space_saved_percent: number;
+  selected_method: string;
+  elapsed_ms: number;
+  sha256_verified: boolean;
+}
+
+interface ArchiveEntry {
+  path: string;
+  size: number;
+  is_dir: boolean;
+}
+
+interface ArchiveListResult {
+  version: number;
+  entry_count: number;
+  entries: ArchiveEntry[];
+}
+
+interface BenchmarkResult {
+  input: string;
+  name: string;
+  original_size: number;
+  compressed_size: number;
+  ratio: number;
+  method: string;
+  duration_ms: number;
+  speed_mb_s: number;
+  sha256_verified: boolean;
+}
+
+interface SystemInfo {
+  available_threads: number;
+  os: string;
+  fit_version: string;
+}
+
+// ────────────────────────────────────────────────────────────
+// HELPER: Format Bytes
+// ────────────────────────────────────────────────────────────
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
 
 // ────────────────────────────────────────────────────────────
 // SIDEBAR
@@ -50,7 +107,7 @@ const navItems: { id: NavTab; label: string; icon: string }[] = [
   { id: 'settings', label: 'Settings', icon: ICONS.settings },
 ];
 
-function Sidebar({ active, onNav }: { active: NavTab; onNav: (t: NavTab) => void }) {
+function Sidebar({ active, onNav, sysInfo }: { active: NavTab; onNav: (t: NavTab) => void; sysInfo: SystemInfo | null }) {
   return (
     <aside className="sidebar">
       <div className="logo-block">
@@ -59,7 +116,7 @@ function Sidebar({ active, onNav }: { active: NavTab; onNav: (t: NavTab) => void
         </div>
         <div>
           <div className="logo-text">FIT ARCHIVE</div>
-          <div className="logo-sub">EXTREME LOSSLESS v0.1.0</div>
+          <div className="logo-sub">EXTREME LOSSLESS v{sysInfo?.fit_version || '0.2.0'}</div>
         </div>
       </div>
 
@@ -81,8 +138,10 @@ function Sidebar({ active, onNav }: { active: NavTab; onNav: (t: NavTab) => void
           <Icon d={ICONS.shield} size={14} color="#34d399" />
           <span className="integrity-label">SHA-256 Lossless Engine</span>
         </div>
-        <p className="integrity-desc">All operations verify byte-exact reconstruction before storing.</p>
-        <div className="integrity-pill">✓ ACTIVE</div>
+        <p className="integrity-desc">
+          {sysInfo ? `${sysInfo.available_threads} Cores Active · ${sysInfo.os.toUpperCase()}` : 'Verifying byte-exact reconstruction.'}
+        </p>
+        <div className="integrity-pill">✓ READY</div>
       </div>
     </aside>
   );
@@ -91,7 +150,7 @@ function Sidebar({ active, onNav }: { active: NavTab; onNav: (t: NavTab) => void
 // ────────────────────────────────────────────────────────────
 // TOOLBAR
 // ────────────────────────────────────────────────────────────
-function Toolbar({ onTab }: { onTab: (t: NavTab) => void }) {
+function Toolbar({ onTab, searchTerm, onSearch }: { onTab: (t: NavTab) => void; searchTerm: string; onSearch: (s: string) => void }) {
   return (
     <header className="toolbar">
       <div className="toolbar-left">
@@ -101,20 +160,21 @@ function Toolbar({ onTab }: { onTab: (t: NavTab) => void }) {
         <button className="btn-secondary" onClick={() => onTab('extract')}>
           <Icon d={ICONS.download} size={14} color="#22d3ee" /> Extract
         </button>
-        <button className="btn-secondary">
-          <Icon d={ICONS.shield} size={14} color="#34d399" /> Test Archive
+        <button className="btn-secondary" onClick={() => onTab('archives')}>
+          <Icon d={ICONS.archive} size={14} color="#34d399" /> Open Archive
         </button>
-        <button className="btn-secondary">
-          <Icon d={ICONS.wrench} size={14} color="#fbbf24" /> Repair
-        </button>
-        <button className="btn-secondary">
-          <Icon d={ICONS.lock} size={14} color="#a78bfa" /> Encrypt
+        <button className="btn-secondary" onClick={() => onTab('benchmark')}>
+          <Icon d={ICONS.bar} size={14} color="#fbbf24" /> Benchmark
         </button>
       </div>
       <div className="toolbar-right">
         <div className="search-box">
           <Icon d={ICONS.search} size={14} color="#64748b" />
-          <input placeholder="Search archive contents..." />
+          <input
+            placeholder="Search archive contents..."
+            value={searchTerm}
+            onChange={e => onSearch(e.target.value)}
+          />
         </div>
       </div>
     </header>
@@ -129,9 +189,9 @@ function HomeView({ onNav }: { onNav: (t: NavTab) => void }) {
     <div className="view-pad">
       <div className="hero-block">
         <div className="hero-icon"><Icon d={ICONS.zap} size={40} color="#030712" /></div>
-        <h1 className="hero-title">FIT — Push the Limits of Lossless Compression</h1>
+        <h1 className="hero-title">FIT — Extreme Lossless Compression &amp; Universal Archive</h1>
         <p className="hero-sub">
-          Multi-pipeline tournament engine · Authenticated encryption · Reed-Solomon recovery · Universal archive support
+          Multi-pipeline tournament engine · Authenticated ChaCha20 encryption · Reed-Solomon recovery · Universal multi-format support
         </p>
         <div className="hero-actions">
           <button className="btn-primary-lg" onClick={() => onNav('smart')}>
@@ -145,12 +205,12 @@ function HomeView({ onNav }: { onNav: (t: NavTab) => void }) {
 
       <div className="feature-grid">
         {[
-          { icon: ICONS.cpu, label: 'Tournament Engine', desc: 'Concurrently runs LZ77, BWT+MTF, Delta+Predictor, Range & Huffman pipelines — picks the smallest verified stream.' },
-          { icon: ICONS.shield, label: '100% Lossless', desc: 'Every byte is verified: SHA-256(original) == SHA-256(decompressed) before committing any compressed block.' },
-          { icon: ICONS.lock, label: 'Argon2id + ChaCha20', desc: 'Memory-hard key derivation and AEAD authenticated encryption protect all payload and metadata blocks.' },
-          { icon: ICONS.layers, label: 'Nested Archives', desc: 'Browse ZIP inside 7Z inside TAR inside FIT — recursive container exploration up to 32 levels deep.' },
-          { icon: ICONS.wrench, label: 'Reed-Solomon Recovery', desc: 'Parity records allow detection and automatic repair of corrupted blocks without full data loss.' },
-          { icon: ICONS.archive, label: 'Universal Reader', desc: 'Plugin-based format detection opens ZIP, TAR, GZIP, XZ, Zstd, 7Z and FIT without trusting file extensions.' },
+          { icon: ICONS.cpu, label: 'Tournament Engine', desc: 'Runs LZ77+Huffman, Delta+Range, BWT+MTF, and Context Predictor pipelines in parallel to choose the optimal verified stream.' },
+          { icon: ICONS.shield, label: '100% Lossless Verification', desc: 'Byte-exact guarantee: SHA-256(original) == SHA-256(decompressed) is checked before writing any archive block.' },
+          { icon: ICONS.lock, label: 'Argon2id + ChaCha20-Poly1305', desc: 'State-of-the-art key derivation and AEAD authenticated encryption protecting data and archive metadata.' },
+          { icon: ICONS.layers, label: 'Universal Archive Reader', desc: 'Automatic magic-byte format detection for FIT, ZIP, TAR, GZIP, 7Z, XZ, and Zstandard archives.' },
+          { icon: ICONS.wrench, label: 'Reed-Solomon Parity', desc: 'Configurable error-correction records that detect and repair data corruption automatically.' },
+          { icon: ICONS.bar, label: 'Live Benchmarking', desc: 'Measure real-time compression ratio, throughput MB/s, and memory performance across different file types.' },
         ].map(f => (
           <div key={f.label} className="feature-card">
             <div className="feature-icon"><Icon d={f.icon} size={20} color="#34d399" /></div>
@@ -166,98 +226,139 @@ function HomeView({ onNav }: { onNav: (t: NavTab) => void }) {
 // ────────────────────────────────────────────────────────────
 // SMART COMPRESS VIEW
 // ────────────────────────────────────────────────────────────
-const PIPELINES: PipelineResult[] = [
-  { name: 'Pipeline A: LZ77 + Huffman', size: '2.84 GB', status: 'pass' },
-  { name: 'Pipeline B: Delta + Context + Range', size: '1.54 GB', status: 'winner' },
-  { name: 'Pipeline C: BWT + MTF + RLE + Huffman', size: '2.12 GB', status: 'pass' },
-  { name: 'Pipeline D: Context Predictor + Range', size: '2.01 GB', status: 'pass' },
-];
-
 const LEVELS = ['Fast', 'Balanced', 'High', 'Ultra', 'Extreme', 'Research'];
 
-const FILES: ArchiveEntry[] = [
-  { name: 'database_dump.json', size: '4.2 GB', ratio: '12.4×', type: 'JSON Dataset', icon: ICONS.file },
-  { name: 'server_access.log', size: '3.1 GB', ratio: '18.2×', type: 'Log File', icon: ICONS.file },
-  { name: 'project_source.tar', size: '1.8 GB', ratio: '4.1×', type: 'Source Archive', icon: ICONS.folder },
-  { name: 'user_backups.db', size: '3.7 GB', ratio: '5.6×', type: 'SQLite Database', icon: ICONS.file },
-];
-
-function SmartCompressView() {
+function SmartCompressView({
+  settings,
+}: {
+  settings: { threads: number; recovery: number; solidMode: string; dedup: boolean };
+}) {
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
+  const [inputPathText, setInputPathText] = useState('');
+  const [outputPath, setOutputPath] = useState('output.fit');
+  const [password, setPassword] = useState('');
   const [level, setLevel] = useState('Balanced');
+  const [recoveryPercent, setRecoveryPercent] = useState(settings.recovery);
   const [running, setRunning] = useState(false);
-  const [done, setDone] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [phase, setPhase] = useState('Awaiting tournament start...');
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<CompressionTelemetry | null>(null);
 
-  const runTournament = useCallback(() => {
-    setRunning(true);
-    setDone(false);
-    setProgress(0);
-    const phases = [
-      'Analyzing file types & entropy…',
-      'Running deduplication pass…',
-      'Launching Pipeline A: LZ77 + Huffman…',
-      'Launching Pipeline B: Delta + Range Coder…',
-      'Launching Pipeline C: BWT + MTF + Huffman…',
-      'Launching Pipeline D: Predictor + Range…',
-      'Verifying SHA-256 integrity for each candidate…',
-      'Selecting smallest valid representation…',
-      'Writing FIT archive with recovery records…',
-    ];
-    let step = 0;
-    timerRef.current = setInterval(() => {
-      step++;
-      setProgress(Math.min(100, Math.round((step / phases.length) * 100)));
-      setPhase(phases[Math.min(step, phases.length - 1)]);
-      if (step >= phases.length) {
-        clearInterval(timerRef.current!);
-        setRunning(false);
-        setDone(true);
+  const addFilePath = async (pathToAdd: string) => {
+    if (!pathToAdd.trim()) return;
+    try {
+      setError(null);
+      const info = await invoke<StagedFile>('get_file_info', { path: pathToAdd.trim() });
+      setStagedFiles(prev => {
+        if (prev.some(f => f.path === info.path)) return prev;
+        return [...prev, info];
+      });
+      setInputPathText('');
+      if (stagedFiles.length === 0) {
+        setOutputPath(`${info.name}.fit`);
       }
-    }, 300);
-  }, []);
+    } catch (err: any) {
+      setError(`Cannot stage file: ${err.toString()}`);
+    }
+  };
+
+  const removeFile = (idx: number) => {
+    setStagedFiles(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const totalOriginalBytes = useMemo(() => {
+    return stagedFiles.reduce((acc, f) => acc + f.size, 0);
+  }, [stagedFiles]);
+
+  const runCompress = async () => {
+    if (stagedFiles.length === 0) {
+      setError('Please stage at least one file or folder to compress.');
+      return;
+    }
+    if (!outputPath.trim()) {
+      setError('Please specify an output archive path.');
+      return;
+    }
+
+    setRunning(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      const telemetry = await invoke<CompressionTelemetry>('smart_compress', {
+        req: {
+          input_paths: stagedFiles.map(f => f.path),
+          output_path: outputPath.trim(),
+          level,
+          password: password.trim() ? password : null,
+          recovery_percent: recoveryPercent,
+          threads: settings.threads,
+          deduplication: settings.dedup,
+          solid: settings.solidMode,
+        },
+      });
+      setResult(telemetry);
+    } catch (err: any) {
+      setError(`Compression error: ${err.toString()}`);
+    } finally {
+      setRunning(false);
+    }
+  };
 
   return (
     <div className="view-pad">
-      {/* Stats bar */}
+      {/* Live Stats */}
       <div className="stats-grid">
-        {[
-          { label: 'Input Size', value: '12.8 GB', color: 'val-white' },
-          { label: 'FIT Output (Est.)', value: '1.54 GB', color: 'val-green' },
-          { label: 'Ratio', value: '8.31×', color: 'val-cyan' },
-          { label: 'Space Saved', value: '87.9%', color: 'val-green' },
-          { label: 'Threads Used', value: '16', color: 'val-white' },
-          { label: 'Recovery Parity', value: '5%', color: 'val-purple' },
-        ].map(s => (
-          <div key={s.label} className="stat-card">
-            <div className="stat-label">{s.label}</div>
-            <div className={`stat-value ${s.color}`}>{s.value}</div>
-          </div>
-        ))}
+        <div className="stat-card">
+          <div className="stat-label">Staged Files</div>
+          <div className="stat-value val-white">{stagedFiles.length}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Total Input Size</div>
+          <div className="stat-value val-cyan">{formatBytes(totalOriginalBytes)}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Output Archive</div>
+          <div className="stat-value val-green">{result ? formatBytes(result.compressed_bytes) : '—'}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Compression Ratio</div>
+          <div className="stat-value val-cyan">{result ? `${result.ratio.toFixed(2)}×` : '—'}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Space Saved</div>
+          <div className="stat-value val-green">{result ? `${result.space_saved_percent.toFixed(1)}%` : '—'}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Reed-Solomon Parity</div>
+          <div className="stat-value val-purple">{recoveryPercent}%</div>
+        </div>
       </div>
 
-      {/* Tournament panel */}
+      {/* Main Tournament & Configuration Panel */}
       <div className="panel">
         <div className="panel-header">
           <div>
-            <h2 className="panel-title">Compression Tournament</h2>
-            <p className="panel-sub">Runs up to {LEVELS.indexOf(level) >= 4 ? '6' : '4'} pipelines concurrently and selects the smallest SHA-256 verified output.</p>
+            <h2 className="panel-title">Smart Compression Tournament</h2>
+            <p className="panel-sub">
+              Parallel candidate tournament with automatic SHA-256 verification and Argon2id encryption.
+            </p>
           </div>
           <button
             className={`btn-run ${running ? 'btn-run-disabled' : ''}`}
-            onClick={runTournament}
-            disabled={running}
+            onClick={runCompress}
+            disabled={running || stagedFiles.length === 0}
           >
-            {running
-              ? <><Icon d={ICONS.spin} size={15} color="#030712" /> Running…</>
-              : <><Icon d={ICONS.play} size={15} color="#030712" /> Run Tournament</>}
+            {running ? (
+              <><Icon d={ICONS.spin} size={15} color="#030712" /> Compressing Tournament…</>
+            ) : (
+              <><Icon d={ICONS.play} size={15} color="#030712" /> Create FIT Archive</>
+            )}
           </button>
         </div>
 
         {/* Level selector */}
         <div className="level-row">
-          <span className="level-label">Level:</span>
+          <span className="level-label">Tournament Level:</span>
           {LEVELS.map(l => (
             <button
               key={l}
@@ -269,108 +370,110 @@ function SmartCompressView() {
           ))}
         </div>
 
-        {/* Progress bar */}
-        {(running || done) && (
-          <div className="progress-block">
-            <div className="progress-meta">
-              <span>{phase}</span>
-              <span className="progress-pct">{progress}%</span>
+        {/* Input Controls */}
+        <div style={{ marginTop: '1.5rem', display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: '16px' }}>
+          <div>
+            <label className="form-label">Output Archive Path (.fit)</label>
+            <input
+              className="form-input"
+              value={outputPath}
+              onChange={e => setOutputPath(e.target.value)}
+              placeholder="e.g. backup.fit or /home/user/archive.fit"
+            />
+          </div>
+          <div>
+            <label className="form-label">Encryption Password (Optional)</label>
+            <input
+              className="form-input"
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="Argon2id + ChaCha20 Protected"
+            />
+          </div>
+        </div>
+
+        {/* Recovery Slider */}
+        <div style={{ marginTop: '1rem', display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <span className="form-label" style={{ marginBottom: 0, minWidth: '150px' }}>Recovery Parity:</span>
+          <input
+            type="range"
+            min={0}
+            max={50}
+            value={recoveryPercent}
+            onChange={e => setRecoveryPercent(+e.target.value)}
+            style={{ flex: 1, accentColor: 'var(--green)' }}
+          />
+          <span className="setting-val">{recoveryPercent}%</span>
+        </div>
+
+        {/* Result Telemetry Display */}
+        {result && (
+          <div className="success-block" style={{ marginTop: '1.5rem', flexDirection: 'column', alignItems: 'flex-start' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Icon d={ICONS.check} size={20} color="#34d399" />
+              <strong>FIT Archive Created Successfully!</strong>
             </div>
-            <div className="progress-track">
-              <div className="progress-fill" style={{ width: `${progress}%` }} />
+            <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-1)', display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+              <span>Engine: <strong style={{ color: 'var(--cyan)' }}>{result.selected_method}</strong></span>
+              <span>Size: <strong>{formatBytes(result.compressed_bytes)}</strong> (saved {result.space_saved_percent.toFixed(1)}%)</span>
+              <span>Time: <strong>{result.elapsed_ms} ms</strong></span>
+              <span>Integrity: <strong style={{ color: 'var(--green)' }}>✓ SHA-256 Verified Lossless</strong></span>
             </div>
           </div>
         )}
 
-        {/* Pipeline results */}
-        <div className="pipelines">
-          {PIPELINES.map(p => (
-            <div key={p.name} className={`pipeline-row ${p.status === 'winner' ? 'pipeline-winner' : ''}`}>
-              <div className="pipeline-info">
-                <div className={`pipeline-dot dot-${p.status}`} />
-                <span className="pipeline-name">{p.name}</span>
-              </div>
-              <div className="pipeline-right">
-                <span className="pipeline-size">{p.size}</span>
-                {p.status === 'winner' && <span className="winner-badge">🏆 WINNER</span>}
-                {p.status === 'pass' && <span className="pass-badge">✓ PASS</span>}
-              </div>
-            </div>
-          ))}
-        </div>
+        {error && (
+          <div className="alert-error">
+            <Icon d={ICONS.alert} size={16} color="#f87171" />
+            <span>{error}</span>
+          </div>
+        )}
       </div>
 
-      {/* File list */}
+      {/* Staged Files Panel */}
       <div className="panel">
         <div className="panel-header-simple">
-          <h3 className="panel-title">Staged Files</h3>
-          <span className="panel-sub">{FILES.length} items · Total 12.8 GB</span>
+          <div>
+            <h3 className="panel-title">Staged Input Files &amp; Directories</h3>
+            <span className="panel-sub">{stagedFiles.length} item(s) staged for compression</span>
+          </div>
         </div>
-        <div className="file-list">
-          {FILES.map((f, i) => (
-            <div key={i} className="file-row">
-              <Icon d={f.icon} size={16} color="#22d3ee" />
-              <div className="file-info">
-                <p className="file-name">{f.name}</p>
-                <p className="file-type">{f.type}</p>
-              </div>
-              <div className="file-meta">
-                <span className="file-size">{f.size}</span>
-                <span className="file-ratio">{f.ratio}</span>
-              </div>
-            </div>
-          ))}
+
+        <div className="input-row" style={{ marginBottom: '1rem' }}>
+          <input
+            className="form-input"
+            value={inputPathText}
+            onChange={e => setInputPathText(e.target.value)}
+            placeholder="Type absolute or relative file/folder path (e.g. Cargo.toml, README.md, src)..."
+            onKeyDown={e => { if (e.key === 'Enter') addFilePath(inputPathText); }}
+          />
+          <button className="btn-secondary" onClick={() => addFilePath(inputPathText)}>
+            <Icon d={ICONS.plus} size={14} /> Add Path
+          </button>
         </div>
-      </div>
-    </div>
-  );
-}
 
-// ────────────────────────────────────────────────────────────
-// ARCHIVE EXPLORER VIEW
-// ────────────────────────────────────────────────────────────
-const TREE = [
-  { depth: 0, name: '📦 backup.fit', type: 'FIT Archive', size: '1.54 GB' },
-  { depth: 1, name: '📦 project.zip', type: 'ZIP Archive', size: '820 MB' },
-  { depth: 2, name: '📁 src/', type: 'Directory', size: '—' },
-  { depth: 3, name: '📄 main.rs', type: 'Rust Source', size: '12 KB' },
-  { depth: 3, name: '📄 lib.rs', type: 'Rust Source', size: '8 KB' },
-  { depth: 2, name: '📦 data.tar.gz', type: 'TAR+GZIP', size: '400 MB' },
-  { depth: 3, name: '🗄 database.sqlite', type: 'SQLite DB', size: '320 MB' },
-  { depth: 1, name: '📄 README.md', type: 'Markdown', size: '4 KB' },
-];
-
-function ArchiveExplorerView() {
-  const [dropped, setDropped] = useState(false);
-
-  return (
-    <div className="view-pad">
-      <div className="panel">
-        <h2 className="panel-title" style={{ marginBottom: '1rem' }}>Universal Archive Explorer</h2>
-
-        {!dropped ? (
-          <div
-            className="drop-zone"
-            onDragOver={e => e.preventDefault()}
-            onDrop={() => setDropped(true)}
-            onClick={() => setDropped(true)}
-          >
-            <div className="drop-icon"><Icon d={ICONS.archive} size={36} color="#34d399" /></div>
-            <p className="drop-title">Drop any archive to explore</p>
-            <p className="drop-sub">.fit .zip .7z .tar .gz .xz .zst — format detected automatically</p>
-            <button className="btn-primary" style={{ marginTop: '1rem' }}>Browse File…</button>
+        {stagedFiles.length === 0 ? (
+          <div className="drop-zone" onClick={() => addFilePath('Cargo.toml')}>
+            <Icon d={ICONS.file} size={32} color="#64748b" />
+            <p className="drop-title">No files staged yet</p>
+            <p className="drop-sub">Type a path above or click here to stage <code>Cargo.toml</code> as an example.</p>
           </div>
         ) : (
-          <div className="tree-panel">
-            <div className="tree-header">
-              <span>backup.fit</span>
-              <span className="tree-badge">FIT Archive · 1.54 GB · 32 entries</span>
-            </div>
-            {TREE.map((node, i) => (
-              <div key={i} className="tree-row" style={{ paddingLeft: `${8 + node.depth * 20}px` }}>
-                <span className="tree-name">{node.name}</span>
-                <span className="tree-type">{node.type}</span>
-                <span className="tree-size">{node.size}</span>
+          <div className="file-list">
+            {stagedFiles.map((f, i) => (
+              <div key={i} className="file-row">
+                <Icon d={f.is_dir ? ICONS.folder : ICONS.file} size={18} color="#22d3ee" />
+                <div className="file-info">
+                  <p className="file-name">{f.name}</p>
+                  <p className="file-type">{f.path} · {f.detected_type} (Entropy: {f.entropy.toFixed(2)})</p>
+                </div>
+                <div className="file-meta">
+                  <span className="badge-tag">{formatBytes(f.size)}</span>
+                  <button className="icon-btn" onClick={() => removeFile(i)} title="Remove file">
+                    <Icon d={ICONS.trash} size={15} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -381,40 +484,238 @@ function ArchiveExplorerView() {
 }
 
 // ────────────────────────────────────────────────────────────
-// EXTRACT VIEW
+// ARCHIVE EXPLORER VIEW
+// ────────────────────────────────────────────────────────────
+function ArchiveExplorerView({ searchTerm }: { searchTerm: string }) {
+  const [archivePath, setArchivePath] = useState('test_archive.fit');
+  const [password, setPassword] = useState('');
+  const [archiveData, setArchiveData] = useState<ArchiveListResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [integrityStatus, setIntegrityStatus] = useState<string | null>(null);
+
+  const exploreArchive = async (targetPath: string) => {
+    if (!targetPath.trim()) return;
+    setLoading(true);
+    setError(null);
+    setIntegrityStatus(null);
+
+    try {
+      const data = await invoke<ArchiveListResult>('list_archive', {
+        archivePath: targetPath.trim(),
+        password: password.trim() ? password : null,
+      });
+      setArchiveData(data);
+    } catch (err: any) {
+      setError(`Cannot read archive: ${err.toString()}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const testIntegrity = async () => {
+    if (!archivePath.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const ok = await invoke<boolean>('test_archive', {
+        archivePath: archivePath.trim(),
+        password: password.trim() ? password : null,
+      });
+      setIntegrityStatus(ok ? 'Integrity Test PASSED: All SHA-256 checksums and parity blocks valid.' : 'Integrity Test FAILED: Corrupted blocks detected.');
+    } catch (err: any) {
+      setError(`Integrity check error: ${err.toString()}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredEntries = useMemo(() => {
+    if (!archiveData) return [];
+    if (!searchTerm.trim()) return archiveData.entries;
+    return archiveData.entries.filter(e => e.path.toLowerCase().includes(searchTerm.toLowerCase()));
+  }, [archiveData, searchTerm]);
+
+  return (
+    <div className="view-pad">
+      <div className="panel">
+        <h2 className="panel-title" style={{ marginBottom: '0.5rem' }}>Universal Archive Explorer</h2>
+        <p className="panel-sub" style={{ marginBottom: '1.5rem' }}>
+          Inspect contents, nested hierarchies, and byte sizes inside .fit, .zip, .tar, .7z, and other archive formats.
+        </p>
+
+        <div className="input-row" style={{ marginBottom: '1rem' }}>
+          <input
+            className="form-input"
+            value={archivePath}
+            onChange={e => setArchivePath(e.target.value)}
+            placeholder="Path to archive file (e.g. output.fit, backup.zip)..."
+            onKeyDown={e => { if (e.key === 'Enter') exploreArchive(archivePath); }}
+          />
+          <input
+            className="form-input"
+            type="password"
+            style={{ maxWidth: '200px' }}
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="Password (if encrypted)"
+          />
+          <button className="btn-primary" onClick={() => exploreArchive(archivePath)} disabled={loading}>
+            {loading ? <Icon d={ICONS.spin} size={14} /> : <Icon d={ICONS.search} size={14} />} Open Archive
+          </button>
+          <button className="btn-secondary" onClick={testIntegrity} disabled={loading}>
+            <Icon d={ICONS.shield} size={14} color="#34d399" /> Test
+          </button>
+        </div>
+
+        {integrityStatus && (
+          <div className="success-block" style={{ marginBottom: '1rem' }}>
+            <Icon d={ICONS.shield} size={18} color="#34d399" />
+            <span>{integrityStatus}</span>
+          </div>
+        )}
+
+        {error && (
+          <div className="alert-error" style={{ marginBottom: '1rem' }}>
+            <Icon d={ICONS.alert} size={16} color="#f87171" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {!archiveData ? (
+          <div className="drop-zone" onClick={() => exploreArchive('output.fit')}>
+            <Icon d={ICONS.archive} size={36} color="#34d399" />
+            <p className="drop-title">Open an archive to view its contents</p>
+            <p className="drop-sub">Specify the archive path above to inspect files, metadata, and directory trees.</p>
+          </div>
+        ) : (
+          <div className="tree-panel">
+            <div className="tree-header">
+              <span>{archivePath} (FIT v{archiveData.version})</span>
+              <span className="tree-badge">{archiveData.entry_count} Total Entries</span>
+            </div>
+            {filteredEntries.length === 0 ? (
+              <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-3)' }}>
+                No entries match the filter "{searchTerm}"
+              </div>
+            ) : (
+              filteredEntries.map((node, i) => (
+                <div key={i} className="tree-row">
+                  <Icon d={node.is_dir ? ICONS.folder : ICONS.file} size={15} color={node.is_dir ? '#fbbf24' : '#22d3ee'} />
+                  <span className="tree-name">{node.path}</span>
+                  <span className="tree-type">{node.is_dir ? 'Directory' : 'File'}</span>
+                  <span className="tree-size">{node.is_dir ? '—' : formatBytes(node.size)}</span>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// UNIVERSAL EXTRACT VIEW
 // ────────────────────────────────────────────────────────────
 function ExtractView() {
+  const [archivePath, setArchivePath] = useState('output.fit');
+  const [outputDir, setOutputDir] = useState('./extracted');
+  const [password, setPassword] = useState('');
   const [extracting, setExtracting] = useState(false);
-  const [done, setDone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [extractedBytes, setExtractedBytes] = useState<number | null>(null);
 
-  const doExtract = () => {
+  const doExtract = async () => {
+    if (!archivePath.trim()) {
+      setError('Please provide an archive path to extract.');
+      return;
+    }
+    if (!outputDir.trim()) {
+      setError('Please specify an output directory.');
+      return;
+    }
+
     setExtracting(true);
-    setTimeout(() => { setExtracting(false); setDone(true); }, 1800);
+    setError(null);
+    setExtractedBytes(null);
+
+    try {
+      const bytes = await invoke<number>('extract_archive', {
+        archivePath: archivePath.trim(),
+        outputDir: outputDir.trim(),
+        password: password.trim() ? password : null,
+      });
+      setExtractedBytes(bytes);
+    } catch (err: any) {
+      setError(`Extraction failed: ${err.toString()}`);
+    } finally {
+      setExtracting(false);
+    }
   };
 
   return (
     <div className="view-pad">
       <div className="panel">
-        <h2 className="panel-title" style={{ marginBottom: '0.5rem' }}>Universal Extract</h2>
+        <h2 className="panel-title" style={{ marginBottom: '0.5rem' }}>Universal Archive Extractor</h2>
         <p className="panel-sub" style={{ marginBottom: '1.5rem' }}>
-          Drop any archive — FIT detects format via magic bytes and extracts safely with path-traversal protection.
+          Extract any FIT, ZIP, TAR, GZIP, or 7Z archive safely with SHA-256 verification and path traversal protection.
         </p>
-        <div className="drop-zone" style={{ marginBottom: '1.5rem' }}>
-          <Icon d={ICONS.download} size={36} color="#22d3ee" />
-          <p className="drop-title" style={{ marginTop: '0.75rem' }}>Drop archive here</p>
-          <p className="drop-sub">.fit .zip .7z .tar.gz .xz .zst and more</p>
+
+        <div className="form-group">
+          <label className="form-label">Archive File Path</label>
+          <input
+            className="form-input"
+            value={archivePath}
+            onChange={e => setArchivePath(e.target.value)}
+            placeholder="e.g. backup.fit or dataset.tar.gz"
+          />
         </div>
 
-        {!done ? (
+        <div className="form-group">
+          <label className="form-label">Extraction Target Directory</label>
+          <input
+            className="form-input"
+            value={outputDir}
+            onChange={e => setOutputDir(e.target.value)}
+            placeholder="e.g. ./extracted or /home/user/restore"
+          />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Decryption Password (if archive is encrypted)</label>
+          <input
+            className="form-input"
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="Argon2id + ChaCha20 Password"
+          />
+        </div>
+
+        <div style={{ marginTop: '1.5rem' }}>
           <button className="btn-primary" onClick={doExtract} disabled={extracting}>
-            {extracting
-              ? <><Icon d={ICONS.spin} size={14} color="#030712" /> Extracting…</>
-              : <><Icon d={ICONS.download} size={14} color="#030712" /> Extract All</>}
+            {extracting ? (
+              <><Icon d={ICONS.spin} size={14} color="#030712" /> Extracting All Files…</>
+            ) : (
+              <><Icon d={ICONS.download} size={14} color="#030712" /> Extract All Files</>
+            )}
           </button>
-        ) : (
-          <div className="success-block">
+        </div>
+
+        {extractedBytes !== null && (
+          <div className="success-block" style={{ marginTop: '1.5rem' }}>
             <Icon d={ICONS.check} size={20} color="#34d399" />
-            <span>Extraction complete · SHA-256 verified · 12.8 GB restored</span>
+            <span>
+              Extraction Complete! Restored <strong>{formatBytes(extractedBytes)}</strong> to <code>{outputDir}</code> with SHA-256 byte-exact integrity.
+            </span>
+          </div>
+        )}
+
+        {error && (
+          <div className="alert-error">
+            <Icon d={ICONS.alert} size={16} color="#f87171" />
+            <span>{error}</span>
           </div>
         )}
       </div>
@@ -425,44 +726,110 @@ function ExtractView() {
 // ────────────────────────────────────────────────────────────
 // BENCHMARK VIEW
 // ────────────────────────────────────────────────────────────
-const BenchData = [
-  { dataset: 'Server Access Logs (100 MB)', ratio: '19.23×', method: 'Delta+Context+Range', time: '0.8s', sha: '✓' },
-  { dataset: 'JSON API Dump (50 MB)', ratio: '10.41×', method: 'LZ77+Huffman', time: '0.5s', sha: '✓' },
-  { dataset: 'Source Code Tree (25 MB)', ratio: '4.23×', method: 'BWT+MTF+Huffman', time: '1.2s', sha: '✓' },
-  { dataset: 'JPEG Image (10 MB)', ratio: '1.00×', method: 'Raw (high entropy)', time: '0.03s', sha: '✓' },
-  { dataset: 'SQLite Database (200 MB)', ratio: '6.78×', method: 'Delta+Huffman', time: '1.8s', sha: '✓' },
-];
-
 function BenchmarkView() {
+  const [benchInput, setBenchInput] = useState('Cargo.lock');
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [benchmarks, setBenchmarks] = useState<BenchmarkResult[]>([]);
+
+  const runBenchmark = async (targetFile: string) => {
+    if (!targetFile.trim()) return;
+    setRunning(true);
+    setError(null);
+
+    try {
+      const res = await invoke<BenchmarkResult>('run_benchmark', {
+        inputPath: targetFile.trim(),
+      });
+      setBenchmarks(prev => [res, ...prev.filter(b => b.input !== res.input)]);
+    } catch (err: any) {
+      setError(`Benchmark error: ${err.toString()}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+
   return (
     <div className="view-pad">
       <div className="panel">
-        <h2 className="panel-title" style={{ marginBottom: '1rem' }}>Compression Benchmark Suite</h2>
-        <table className="bench-table">
-          <thead>
-            <tr>
-              <th>Dataset</th>
-              <th>Ratio</th>
-              <th>Winning Pipeline</th>
-              <th>Time</th>
-              <th>SHA-256</th>
-            </tr>
-          </thead>
-          <tbody>
-            {BenchData.map((row, i) => (
-              <tr key={i}>
-                <td>{row.dataset}</td>
-                <td className="val-green">{row.ratio}</td>
-                <td className="val-cyan-sm">{row.method}</td>
-                <td>{row.time}</td>
-                <td className="val-green">{row.sha}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <p className="panel-sub" style={{ marginTop: '1rem' }}>
-          All ratios are real measurements. Incompressible data (JPEG, encrypted files) is stored raw — FIT never inflates archives.
+        <h2 className="panel-title" style={{ marginBottom: '0.5rem' }}>Live Compression Benchmark Suite</h2>
+        <p className="panel-sub" style={{ marginBottom: '1.5rem' }}>
+          Test FIT Multi-Pipeline Tournament compression ratio, decompression roundtrip, speed (MB/s), and SHA-256 verification on any real file.
         </p>
+
+        <div className="input-row" style={{ marginBottom: '1.5rem' }}>
+          <input
+            className="form-input"
+            value={benchInput}
+            onChange={e => setBenchInput(e.target.value)}
+            placeholder="File path to benchmark (e.g. Cargo.lock, Cargo.toml, README.md)..."
+          />
+          <button className="btn-primary" onClick={() => runBenchmark(benchInput)} disabled={running}>
+            {running ? <><Icon d={ICONS.spin} size={14} /> Benchmarking…</> : <><Icon d={ICONS.play} size={14} /> Run Benchmark</>}
+          </button>
+        </div>
+
+        {/* Preset quick test buttons */}
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>Quick Presets:</span>
+          {['Cargo.lock', 'Cargo.toml', 'README.md', 'ARCHITECTURE.md'].map(preset => (
+            <button
+              key={preset}
+              className="level-btn"
+              onClick={() => {
+                setBenchInput(preset);
+                runBenchmark(preset);
+              }}
+              disabled={running}
+            >
+              {preset}
+            </button>
+          ))}
+        </div>
+
+        {error && (
+          <div className="alert-error" style={{ marginBottom: '1.5rem' }}>
+            <Icon d={ICONS.alert} size={16} color="#f87171" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {benchmarks.length === 0 ? (
+          <div className="drop-zone" onClick={() => runBenchmark('Cargo.lock')}>
+            <Icon d={ICONS.bar} size={32} color="#fbbf24" />
+            <p className="drop-title">No benchmarks executed yet</p>
+            <p className="drop-sub">Click a preset above or type a file path to measure real FIT tournament compression.</p>
+          </div>
+        ) : (
+          <table className="bench-table">
+            <thead>
+              <tr>
+                <th>Target File</th>
+                <th>Original</th>
+                <th>Compressed</th>
+                <th>Ratio</th>
+                <th>Winning Engine</th>
+                <th>Throughput</th>
+                <th>Time</th>
+                <th>SHA-256</th>
+              </tr>
+            </thead>
+            <tbody>
+              {benchmarks.map((row, i) => (
+                <tr key={i}>
+                  <td style={{ fontWeight: 600, color: 'var(--text-1)' }}>{row.name}</td>
+                  <td>{formatBytes(row.original_size)}</td>
+                  <td>{formatBytes(row.compressed_size)}</td>
+                  <td className="val-green" style={{ fontWeight: 700 }}>{row.ratio.toFixed(2)}×</td>
+                  <td className="val-cyan-sm">{row.method}</td>
+                  <td className="val-purple" style={{ fontFamily: 'JetBrains Mono', fontSize: '11px' }}>{row.speed_mb_s} MB/s</td>
+                  <td>{row.duration_ms} ms</td>
+                  <td className="val-green">{row.sha256_verified ? '✓ PASS' : '✗ FAIL'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
@@ -471,47 +838,103 @@ function BenchmarkView() {
 // ────────────────────────────────────────────────────────────
 // SETTINGS VIEW
 // ────────────────────────────────────────────────────────────
-function SettingsView() {
-  const [threads, setThreads] = useState(16);
-  const [recovery, setRecovery] = useState(5);
-  const [solidMode, setSolidMode] = useState('Auto');
-  const [dedup, setDedup] = useState(true);
-
+function SettingsView({
+  settings,
+  onUpdateSettings,
+  sysInfo,
+}: {
+  settings: { threads: number; recovery: number; solidMode: string; dedup: boolean };
+  onUpdateSettings: (s: any) => void;
+  sysInfo: SystemInfo | null;
+}) {
   return (
     <div className="view-pad">
       <div className="panel">
-        <h2 className="panel-title" style={{ marginBottom: '1.5rem' }}>FIT Engine Configuration</h2>
+        <h2 className="panel-title" style={{ marginBottom: '1.5rem' }}>FIT Engine &amp; Hardware Configuration</h2>
         <div className="settings-grid">
           <div className="setting-row">
-            <label>Worker Threads</label>
+            <div>
+              <label>Worker Parallelism (Rayon Threads)</label>
+              <p className="panel-sub">Controls CPU cores allocated for concurrent compression tournaments.</p>
+            </div>
             <div className="setting-control">
-              <input type="range" min={1} max={32} value={threads} onChange={e => setThreads(+e.target.value)} />
-              <span className="setting-val">{threads}</span>
+              <input
+                type="range"
+                min={1}
+                max={32}
+                value={settings.threads}
+                onChange={e => onUpdateSettings({ ...settings, threads: +e.target.value })}
+              />
+              <span className="setting-val">{settings.threads}</span>
             </div>
           </div>
+
           <div className="setting-row">
-            <label>Recovery Parity %</label>
+            <div>
+              <label>Default Recovery Parity (%)</label>
+              <p className="panel-sub">Reed-Solomon erasure coding redundancy for error correction.</p>
+            </div>
             <div className="setting-control">
-              <input type="range" min={0} max={50} value={recovery} onChange={e => setRecovery(+e.target.value)} />
-              <span className="setting-val">{recovery}%</span>
+              <input
+                type="range"
+                min={0}
+                max={50}
+                value={settings.recovery}
+                onChange={e => onUpdateSettings({ ...settings, recovery: +e.target.value })}
+              />
+              <span className="setting-val">{settings.recovery}%</span>
             </div>
           </div>
+
           <div className="setting-row">
-            <label>Solid Mode</label>
+            <div>
+              <label>Solid Archive Mode</label>
+              <p className="panel-sub">Groups continuous files to maximize cross-file redundancy.</p>
+            </div>
             <div className="seg-ctrl">
               {['Auto', 'Solid', 'Non-Solid'].map(m => (
-                <button key={m} className={solidMode === m ? 'seg-active' : ''} onClick={() => setSolidMode(m)}>{m}</button>
+                <button
+                  key={m}
+                  className={settings.solidMode === m ? 'seg-active' : ''}
+                  onClick={() => onUpdateSettings({ ...settings, solidMode: m })}
+                >
+                  {m}
+                </button>
               ))}
             </div>
           </div>
+
           <div className="setting-row">
-            <label>Archive Deduplication</label>
-            <div className="toggle" onClick={() => setDedup(!dedup)}>
-              <div className={`toggle-thumb ${dedup ? 'toggle-on' : ''}`} />
+            <div>
+              <label>FastCDC Deduplication</label>
+              <p className="panel-sub">Content-defined chunking to detect duplicate byte blocks.</p>
+            </div>
+            <div className="toggle" onClick={() => onUpdateSettings({ ...settings, dedup: !settings.dedup })}>
+              <div className={`toggle-thumb ${settings.dedup ? 'toggle-on' : ''}`} />
             </div>
           </div>
         </div>
       </div>
+
+      {sysInfo && (
+        <div className="panel">
+          <h3 className="panel-title" style={{ marginBottom: '0.75rem' }}>System Environment</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+            <div className="stat-card">
+              <div className="stat-label">Operating System</div>
+              <div className="stat-value val-white" style={{ fontSize: '16px' }}>{sysInfo.os.toUpperCase()}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Hardware Logical Cores</div>
+              <div className="stat-value val-cyan" style={{ fontSize: '16px' }}>{sysInfo.available_threads} Cores</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">FIT Core Engine</div>
+              <div className="stat-value val-green" style={{ fontSize: '16px' }}>v{sysInfo.fit_version}</div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -521,21 +944,68 @@ function SettingsView() {
 // ────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState<NavTab>('home');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
+
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem('fit_settings');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {}
+    }
+    return {
+      threads: 8,
+      recovery: 5,
+      solidMode: 'Auto',
+      dedup: true,
+    };
+  });
+
+  const handleUpdateSettings = (newSettings: typeof settings) => {
+    setSettings(newSettings);
+    localStorage.setItem('fit_settings', JSON.stringify(newSettings));
+  };
+
+  useEffect(() => {
+    invoke<SystemInfo>('get_system_info')
+      .then(info => {
+        setSysInfo(info);
+        setSettings((prev: typeof settings) => ({
+          ...prev,
+          threads: prev.threads || info.available_threads,
+        }));
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleToolbarSearch = (term: string) => {
+    setSearchTerm(term);
+    if (tab !== 'archives') {
+      setTab('archives');
+    }
+  };
 
   const views: Record<NavTab, React.ReactNode> = {
     home: <HomeView onNav={setTab} />,
-    smart: <SmartCompressView />,
-    archives: <ArchiveExplorerView />,
+    smart: <SmartCompressView settings={settings} />,
+    archives: <ArchiveExplorerView searchTerm={searchTerm} />,
     extract: <ExtractView />,
     benchmark: <BenchmarkView />,
-    settings: <SettingsView />,
+    settings: (
+      <SettingsView
+        settings={settings}
+        onUpdateSettings={handleUpdateSettings}
+        sysInfo={sysInfo}
+      />
+    ),
   };
 
   return (
     <div className="app">
-      <Sidebar active={tab} onNav={setTab} />
+      <Sidebar active={tab} onNav={setTab} sysInfo={sysInfo} />
       <div className="main">
-        <Toolbar onTab={setTab} />
+        <Toolbar onTab={setTab} searchTerm={searchTerm} onSearch={handleToolbarSearch} />
         <div className="content">{views[tab]}</div>
       </div>
     </div>

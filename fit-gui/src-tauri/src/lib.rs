@@ -292,6 +292,7 @@ fn inspect_nested(path: PathBuf) -> Result<serde_json::Value, String> {
     serde_json::to_value(tree).map_err(|e| e.to_string())
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![

@@ -84,7 +84,7 @@ fn get_system_info() -> SystemInfo {
     SystemInfo {
         available_threads: threads,
         os: std::env::consts::OS.to_string(),
-        fit_version: "0.2.1".into(),
+        fit_version: "0.2.2".into(),
         working_dir,
     }
 }

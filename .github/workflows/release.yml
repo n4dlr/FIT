@@ -27,7 +27,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -146,7 +146,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Frontend Dependencies
         run: cd fit-gui && npm install
@@ -154,7 +154,7 @@ jobs:
       - name: Initialize Tauri Android Project
         run: |
           cd fit-gui
-          npx -y @tauri-apps/cli android init
+          npm run tauri android init || true
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
           NDK_HOME: ${{ env.NDK_HOME }}
@@ -162,7 +162,7 @@ jobs:
       - name: Build Android APK (release)
         run: |
           cd fit-gui
-          npx -y @tauri-apps/cli android build --apk
+          npm run tauri android build -- --apk
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
           NDK_HOME: ${{ env.NDK_HOME }}

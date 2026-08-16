@@ -5,7 +5,33 @@ use fit_detection::FileTypeDetector;
 use fit_plugins::NestedArchiveExplorer;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+fn resolve_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let p = path.as_ref();
+    if p.exists() {
+        return p.to_path_buf();
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let in_cwd = cwd.join(p);
+        if in_cwd.exists() {
+            return in_cwd;
+        }
+        if let Some(parent) = cwd.parent() {
+            let in_parent = parent.join(p);
+            if in_parent.exists() {
+                return in_parent;
+            }
+            if let Some(grand) = parent.parent() {
+                let in_grand = grand.join(p);
+                if in_grand.exists() {
+                    return in_grand;
+                }
+            }
+        }
+    }
+    p.to_path_buf()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompressionRequest {
@@ -45,30 +71,38 @@ pub struct SystemInfo {
     pub available_threads: usize,
     pub os: String,
     pub fit_version: String,
+    pub working_dir: String,
 }
 
 #[tauri::command]
 fn get_system_info() -> SystemInfo {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     SystemInfo {
         available_threads: threads,
         os: std::env::consts::OS.to_string(),
         fit_version: "0.2.1".into(),
+        working_dir,
     }
 }
 
 #[tauri::command]
 fn get_file_info(path: PathBuf) -> Result<FileInfo, String> {
-    let metadata = std::fs::metadata(&path).map_err(|e| format!("Failed to read file metadata for {:?}: {}", path, e))?;
+    let resolved = resolve_path(&path);
+    let metadata = std::fs::metadata(&resolved)
+        .map_err(|e| format!("Failed to read file metadata for {:?}: {}", path, e))?;
     let is_dir = metadata.is_dir();
     let size = if is_dir { 0 } else { metadata.len() };
-    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = resolved.file_name().unwrap_or_default().to_string_lossy().to_string();
 
     let (detected_type, entropy) = if is_dir {
         ("Directory".to_string(), 0.0)
     } else {
-        let det = FileTypeDetector::detect_file(&path).unwrap_or(fit_detection::DetectedType::UnknownBinary);
-        let mut f = File::open(&path).map_err(|e| e.to_string())?;
+        let det = FileTypeDetector::detect_file(&resolved).unwrap_or(fit_detection::DetectedType::UnknownBinary);
+        let mut f = File::open(&resolved).map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; 8192.min(size.max(1) as usize)];
         use std::io::Read;
         let read = f.read(&mut buf).unwrap_or(0);
@@ -78,7 +112,7 @@ fn get_file_info(path: PathBuf) -> Result<FileInfo, String> {
     };
 
     Ok(FileInfo {
-        path: path.to_string_lossy().to_string(),
+        path: resolved.to_string_lossy().to_string(),
         name,
         size,
         is_dir,
@@ -108,6 +142,9 @@ fn smart_compress(req: CompressionRequest) -> Result<CompressionTelemetry, Strin
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
     });
 
+    let resolved_inputs: Vec<PathBuf> = req.input_paths.iter().map(|p| resolve_path(p)).collect();
+    let resolved_output = resolve_path(&req.output_path);
+
     let start = std::time::Instant::now();
     let config = CompressionConfig {
         level,
@@ -120,19 +157,19 @@ fn smart_compress(req: CompressionRequest) -> Result<CompressionTelemetry, Strin
     };
 
     let builder = FitArchiveBuilder::new(config);
-    if let Some(parent) = req.output_path.parent() {
+    if let Some(parent) = resolved_output.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut out_file = File::create(&req.output_path).map_err(|e| format!("Cannot create output file {:?}: {}", req.output_path, e))?;
+    let mut out_file = File::create(&resolved_output)
+        .map_err(|e| format!("Cannot create output file {:?}: {}", resolved_output, e))?;
 
     let compressed_len = builder
-        .create_archive(&req.input_paths, &mut out_file, None)
+        .create_archive(&resolved_inputs, &mut out_file, None)
         .map_err(|e| e.to_string())?;
 
     let elapsed = start.elapsed().as_millis() as u64;
 
-    let total_orig: u64 = req
-        .input_paths
+    let total_orig: u64 = resolved_inputs
         .iter()
         .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
@@ -162,10 +199,11 @@ fn smart_compress(req: CompressionRequest) -> Result<CompressionTelemetry, Strin
 
 #[tauri::command]
 fn extract_archive(archive_path: PathBuf, output_dir: PathBuf, password: Option<String>) -> Result<u64, String> {
-    if !archive_path.exists() {
+    let resolved = resolve_path(&archive_path);
+    if !resolved.exists() {
         return Err(format!("Archive file {:?} does not exist", archive_path));
     }
-    let mut file = File::open(&archive_path).map_err(|e| e.to_string())?;
+    let mut file = File::open(&resolved).map_err(|e| e.to_string())?;
     let pass = password.filter(|p| !p.trim().is_empty());
     FitArchiveReader::extract_all(&mut file, output_dir, pass.as_deref(), None)
         .map_err(|e| e.to_string())
@@ -173,10 +211,11 @@ fn extract_archive(archive_path: PathBuf, output_dir: PathBuf, password: Option<
 
 #[tauri::command]
 fn list_archive(archive_path: PathBuf, password: Option<String>) -> Result<serde_json::Value, String> {
-    if !archive_path.exists() {
+    let resolved = resolve_path(&archive_path);
+    if !resolved.exists() {
         return Err(format!("Archive file {:?} does not exist", archive_path));
     }
-    let mut file = File::open(&archive_path).map_err(|e| e.to_string())?;
+    let mut file = File::open(&resolved).map_err(|e| e.to_string())?;
     let pass = password.filter(|p| !p.trim().is_empty());
     let (header, entries) = FitArchiveReader::list_entries(&mut file, pass.as_deref())
         .map_err(|e| e.to_string())?;
@@ -196,20 +235,22 @@ fn list_archive(archive_path: PathBuf, password: Option<String>) -> Result<serde
 
 #[tauri::command]
 fn test_archive(archive_path: PathBuf, password: Option<String>) -> Result<bool, String> {
-    if !archive_path.exists() {
+    let resolved = resolve_path(&archive_path);
+    if !resolved.exists() {
         return Err(format!("Archive file {:?} does not exist", archive_path));
     }
-    let mut file = File::open(&archive_path).map_err(|e| e.to_string())?;
+    let mut file = File::open(&resolved).map_err(|e| e.to_string())?;
     let pass = password.filter(|p| !p.trim().is_empty());
     FitArchiveReader::test_archive(&mut file, pass.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn run_benchmark(input_path: PathBuf) -> Result<serde_json::Value, String> {
-    if !input_path.exists() {
+    let resolved = resolve_path(&input_path);
+    if !resolved.exists() {
         return Err(format!("Input file {:?} does not exist", input_path));
     }
-    let data = std::fs::read(&input_path).map_err(|e| e.to_string())?;
+    let data = std::fs::read(&resolved).map_err(|e| e.to_string())?;
     let engine = CompressionEngine::new(CompressionConfig::default());
     let start = std::time::Instant::now();
     let (method, compressed) = engine.compress_buffer(&data).map_err(|e| e.to_string())?;
@@ -224,8 +265,8 @@ fn run_benchmark(input_path: PathBuf) -> Result<serde_json::Value, String> {
     };
 
     Ok(serde_json::json!({
-        "input": input_path.to_string_lossy(),
-        "name": input_path.file_name().unwrap_or_default().to_string_lossy(),
+        "input": resolved.to_string_lossy(),
+        "name": resolved.file_name().unwrap_or_default().to_string_lossy(),
         "original_size": data.len(),
         "compressed_size": compressed.len(),
         "ratio": if compressed.is_empty() { 1.0 } else { data.len() as f64 / compressed.len() as f64 },
@@ -238,14 +279,16 @@ fn run_benchmark(input_path: PathBuf) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn detect_file(path: PathBuf) -> Result<String, String> {
-    let detected = FileTypeDetector::detect_file(&path).map_err(|e| e.to_string())?;
+    let resolved = resolve_path(&path);
+    let detected = FileTypeDetector::detect_file(&resolved).map_err(|e| e.to_string())?;
     Ok(format!("{:?}", detected))
 }
 
 #[tauri::command]
 fn inspect_nested(path: PathBuf) -> Result<serde_json::Value, String> {
+    let resolved = resolve_path(&path);
     let explorer = NestedArchiveExplorer::default();
-    let tree = explorer.inspect_nested(path).map_err(|e| e.to_string())?;
+    let tree = explorer.inspect_nested(resolved).map_err(|e| e.to_string())?;
     serde_json::to_value(tree).map_err(|e| e.to_string())
 }
 

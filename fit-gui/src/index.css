@@ -81,6 +81,7 @@ body { background: var(--bg-base); }
   letter-spacing: 0.05em;
   background: var(--grad-main);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 .logo-sub { font-size: 9px; font-family: 'JetBrains Mono', monospace; color: var(--text-3); letter-spacing: 0.08em; margin-top: 1px; }
